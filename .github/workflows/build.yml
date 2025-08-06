@@ -45,10 +45,10 @@ jobs:
       run: |
         $version = "${{ steps.get_version.outputs.VERSION }}"
         $originalPath = "dist\hover.exe"
-        $versionedPath = "dist\hover-v$version.exe"
+        $versionedName = "hover-v$version.exe"
         if (Test-Path $originalPath) {
-          Rename-Item $originalPath $versionedPath
-          echo "Renamed executable to hover-v$version.exe"
+          Rename-Item -Path $originalPath -NewName $versionedName
+          echo "Renamed executable to $versionedName"
         } else {
           echo "Original executable not found at $originalPath"
           exit 1
@@ -57,10 +57,11 @@ jobs:
       
     - name: Create portable package
       run: |
-        mkdir release
+        New-Item -ItemType Directory -Path "release" -Force
         $version = "${{ steps.get_version.outputs.VERSION }}"
-        copy "dist\hover-v$version.exe" release\
-        copy README.md release\
+        Copy-Item "dist\hover-v$version.exe" "release\" -Force
+        Copy-Item "README.md" "release\" -Force
+        echo "Created release package with hover-v$version.exe"
       shell: powershell
       
     - name: Upload executable artifact
