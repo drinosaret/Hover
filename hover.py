@@ -7,6 +7,8 @@ from tkinter import ttk, messagebox
 import threading
 import os
 import sys
+import pystray
+from PIL import Image, ImageDraw
 from version import __version__, __title__
 
 def set_window_always_on_top(hwnd, always_on_top):
@@ -16,14 +18,53 @@ def set_window_always_on_top(hwnd, always_on_top):
         if not win32gui.IsWindow(hwnd):
             return False
         
-        if always_on_top:
-            result = win32gui.SetWindowPos(hwnd, win32con.HWND_TOPMOST, 0, 0, 0, 0, 
-                                         win32con.SWP_NOMOVE | win32con.SWP_NOSIZE | win32con.SWP_NOACTIVATE)
-        else:
-            result = win32gui.SetWindowPos(hwnd, win32con.HWND_NOTOPMOST, 0, 0, 0, 0, 
-                                         win32con.SWP_NOMOVE | win32con.SWP_NOSIZE | win32con.SWP_NOACTIVATE)
+        # Try multiple approaches for better reliability
+        attempts = 0
+        max_attempts = 3
         
-        return result != 0
+        while attempts < max_attempts:
+            try:
+                if always_on_top:
+                    # First attempt: Standard topmost setting
+                    result = win32gui.SetWindowPos(hwnd, win32con.HWND_TOPMOST, 0, 0, 0, 0, 
+                                                 win32con.SWP_NOMOVE | win32con.SWP_NOSIZE | win32con.SWP_NOACTIVATE)
+                    
+                    # Verify it worked by checking the extended style
+                    time.sleep(0.1)  # Small delay to let the change take effect
+                    extended_style = win32gui.GetWindowLong(hwnd, win32con.GWL_EXSTYLE)
+                    is_topmost = bool(extended_style & win32con.WS_EX_TOPMOST)
+                    
+                    if result != 0 and is_topmost:
+                        return True
+                    
+                    # If verification failed, try alternative approach
+                    if attempts == 1:
+                        # Force refresh by setting to not topmost first, then topmost
+                        win32gui.SetWindowPos(hwnd, win32con.HWND_NOTOPMOST, 0, 0, 0, 0, 
+                                            win32con.SWP_NOMOVE | win32con.SWP_NOSIZE | win32con.SWP_NOACTIVATE)
+                        time.sleep(0.05)
+                        result = win32gui.SetWindowPos(hwnd, win32con.HWND_TOPMOST, 0, 0, 0, 0, 
+                                                     win32con.SWP_NOMOVE | win32con.SWP_NOSIZE | win32con.SWP_NOACTIVATE)
+                else:
+                    result = win32gui.SetWindowPos(hwnd, win32con.HWND_NOTOPMOST, 0, 0, 0, 0, 
+                                                 win32con.SWP_NOMOVE | win32con.SWP_NOSIZE | win32con.SWP_NOACTIVATE)
+                    
+                    # For removing topmost, we don't need as strict verification
+                    if result != 0:
+                        return True
+                
+                attempts += 1
+                if attempts < max_attempts:
+                    time.sleep(0.1)  # Wait before retry
+                    
+            except Exception as inner_e:
+                print(f"Attempt {attempts + 1} failed: {inner_e}")
+                attempts += 1
+                if attempts < max_attempts:
+                    time.sleep(0.1)
+                
+        return False
+        
     except Exception as e:
         print(f"Error setting window always on top: {e}")
         return False
@@ -70,9 +111,104 @@ def get_all_windows():
     win32gui.EnumWindows(enum_windows_callback, hwnd_list)
     return hwnd_list
 
+def create_tray_icon():
+    """Create a system tray icon."""
+    # Create a simple icon if the file doesn't exist
+    def create_default_icon():
+        # Create a simple 64x64 icon
+        width = 64
+        height = 64
+        image = Image.new('RGBA', (width, height), (0, 0, 0, 0))
+        draw = ImageDraw.Draw(image)
+        
+        # Draw a simple window icon
+        draw.rectangle([8, 16, 56, 48], fill=(70, 130, 180, 255), outline=(25, 25, 112, 255), width=2)
+        draw.rectangle([12, 20, 24, 32], fill=(173, 216, 230, 255))
+        draw.rectangle([28, 20, 40, 32], fill=(173, 216, 230, 255))
+        draw.rectangle([44, 20, 52, 32], fill=(173, 216, 230, 255))
+        draw.rectangle([12, 36, 24, 44], fill=(173, 216, 230, 255))
+        draw.rectangle([28, 36, 40, 44], fill=(173, 216, 230, 255))
+        draw.rectangle([44, 36, 52, 44], fill=(173, 216, 230, 255))
+        
+        return image
+
+    def get_tray_icon():
+        """Get the icon for the system tray."""
+        icon_path = None
+        
+        if getattr(sys, 'frozen', False):
+            # Running as executable
+            icon_path = os.path.join(sys._MEIPASS, 'hover_icon.ico')
+        else:
+            # Running as script
+            icon_path = 'hover_icon.ico'
+        
+        if icon_path and os.path.exists(icon_path):
+            try:
+                return Image.open(icon_path)
+            except Exception as e:
+                print(f"Could not load tray icon: {e}")
+        
+        # Fallback to default icon
+        return create_default_icon()
+
+    return get_tray_icon()
+
 def create_ui():
     """Create the UI window using tkinter."""
     selected_hwnd = None
+    topmost_monitor_thread = None
+    tray_icon = None
+    
+    def show_window():
+        """Show the main window."""
+        root.deiconify()
+        root.lift()
+        root.focus_force()
+
+    def hide_to_tray():
+        """Hide the window to system tray."""
+        root.withdraw()
+
+    def on_tray_click(icon, item):
+        """Handle tray icon click."""
+        show_window()
+
+    def quit_application():
+        """Quit the application completely."""
+        if tray_icon:
+            tray_icon.stop()
+        on_close()
+
+    def setup_tray():
+        """Set up the system tray icon."""
+        nonlocal tray_icon
+        
+        try:
+            icon_image = create_tray_icon()
+            
+            # Create tray menu
+            menu = pystray.Menu(
+                pystray.MenuItem("Show Window", on_tray_click, default=True),
+                pystray.MenuItem("Quit", quit_application)
+            )
+            
+            # Create tray icon
+            tray_icon = pystray.Icon(
+                name=f"{__title__}",
+                icon=icon_image,
+                title=f"{__title__} v{__version__}",
+                menu=menu
+            )
+            
+            # Run tray in separate thread
+            tray_thread = threading.Thread(target=tray_icon.run, daemon=True)
+            tray_thread.start()
+            
+            return True
+        except Exception as e:
+            print(f"Failed to create system tray icon: {e}")
+            return False
     
     def on_window_select():
         """Handle window selection from dropdown."""
@@ -89,6 +225,7 @@ def create_ui():
                     if selected_hwnd and win32gui.IsWindow(selected_hwnd):
                         always_on_top_var.set(False)
                         hover_effect_var.set(False)
+                        stop_topmost_monitoring()
                         set_window_always_on_top(selected_hwnd, False)
                         stop_hover_effect(selected_hwnd)
                     
@@ -127,6 +264,8 @@ def create_ui():
         
         # Reset selection and disable controls
         nonlocal selected_hwnd
+        if selected_hwnd:
+            stop_topmost_monitoring()
         selected_hwnd = None
         topmost_checkbox.config(state='disabled')
         hover_effect_checkbox.config(state='disabled')
@@ -137,11 +276,25 @@ def create_ui():
         """Toggle the always-on-top state of the selected window."""
         if selected_hwnd:
             current_topmost = always_on_top_var.get()
-            success = set_window_always_on_top(selected_hwnd, current_topmost)
-            if not success:
-                # If setting failed, revert the checkbox state
-                always_on_top_var.set(not current_topmost)
-                messagebox.showerror("Error", "Failed to set window always on top. The window may have been closed.")
+            
+            if current_topmost:
+                # Enable always-on-top with monitoring
+                success = set_window_always_on_top(selected_hwnd, True)
+                if success:
+                    # Start continuous monitoring
+                    start_topmost_monitoring(selected_hwnd)
+                    print(f"Enabled always-on-top with monitoring for window {selected_hwnd}")
+                else:
+                    # If setting failed, revert the checkbox state
+                    always_on_top_var.set(False)
+                    messagebox.showerror("Error", "Failed to set window always on top. The window may have been closed.")
+            else:
+                # Disable always-on-top and stop monitoring
+                stop_topmost_monitoring()
+                success = set_window_always_on_top(selected_hwnd, False)
+                if not success:
+                    messagebox.showwarning("Warning", "Failed to remove always-on-top state. The window may have been closed.")
+                print(f"Disabled always-on-top for window {selected_hwnd}")
 
     def on_toggle_hover_effect():
         """Toggle the hover effect (show/hide based on mouse hover)."""
@@ -170,16 +323,119 @@ def create_ui():
         """Stop the hover effect and set window to fully visible."""
         set_window_transparent(hwnd, 255)  # Make the window fully visible when hover effect is stopped
 
+    def is_window_topmost(hwnd):
+        """Check if a window is currently set as topmost."""
+        try:
+            if not win32gui.IsWindow(hwnd):
+                return False
+            
+            extended_style = win32gui.GetWindowLong(hwnd, win32con.GWL_EXSTYLE)
+            return bool(extended_style & win32con.WS_EX_TOPMOST)
+        except Exception as e:
+            print(f"Error checking topmost status: {e}")
+            return False
+
+    def monitor_topmost_status(hwnd):
+        """Continuously monitor and maintain the topmost status of a window."""
+        last_check_time = time.time()
+        consecutive_failures = 0
+        max_failures = 3
+        
+        while always_on_top_var.get() and hwnd == selected_hwnd:
+            try:
+                # Check if the window is still valid
+                if not win32gui.IsWindow(hwnd):
+                    print(f"Window {hwnd} is no longer valid, stopping topmost monitoring")
+                    break
+                
+                # Check current topmost status
+                current_status = is_window_topmost(hwnd)
+                
+                # If the window should be topmost but isn't, try to fix it
+                if always_on_top_var.get() and not current_status:
+                    print(f"Window {hwnd} lost topmost status, attempting to restore...")
+                    success = set_window_always_on_top(hwnd, True)
+                    
+                    if success:
+                        consecutive_failures = 0
+                        print(f"Successfully restored topmost status for window {hwnd}")
+                    else:
+                        consecutive_failures += 1
+                        print(f"Failed to restore topmost status (attempt {consecutive_failures}/{max_failures})")
+                        
+                        if consecutive_failures >= max_failures:
+                            print(f"Too many consecutive failures, window may be unresponsive")
+                            # Optionally notify user via UI
+                            root.after(0, lambda: messagebox.showwarning(
+                                "Topmost Monitor", 
+                                f"Unable to maintain always-on-top for the selected window. "
+                                f"The window may be unresponsive or have been closed."
+                            ))
+                            break
+                else:
+                    consecutive_failures = 0
+                
+                # Adaptive monitoring frequency
+                current_time = time.time()
+                if current_time - last_check_time > 30:  # Every 30 seconds, do a more thorough check
+                    # Force refresh the topmost state
+                    if always_on_top_var.get():
+                        set_window_always_on_top(hwnd, True)
+                    last_check_time = current_time
+                
+                # Sleep for a short interval before next check
+                time.sleep(0.5)  # Check every 500ms
+                
+            except Exception as e:
+                print(f"Error in topmost monitoring: {e}")
+                consecutive_failures += 1
+                if consecutive_failures >= max_failures:
+                    break
+                time.sleep(1)  # Wait longer after errors
+
+    def start_topmost_monitoring(hwnd):
+        """Start monitoring the topmost status in a separate thread."""
+        nonlocal topmost_monitor_thread
+        
+        # Stop any existing monitoring thread
+        stop_topmost_monitoring()
+        
+        if always_on_top_var.get():
+            topmost_monitor_thread = threading.Thread(target=monitor_topmost_status, args=(hwnd,))
+            topmost_monitor_thread.daemon = True
+            topmost_monitor_thread.start()
+            print(f"Started topmost monitoring for window {hwnd}")
+
+    def stop_topmost_monitoring():
+        """Stop the topmost monitoring thread."""
+        nonlocal topmost_monitor_thread
+        
+        if topmost_monitor_thread and topmost_monitor_thread.is_alive():
+            # The thread will stop when always_on_top_var becomes False
+            # or when selected_hwnd changes
+            print("Stopping topmost monitoring...")
+            topmost_monitor_thread = None
+
     def on_close():
         """Handle window close event to disable all effects and reset the selected window."""
         if selected_hwnd and win32gui.IsWindow(selected_hwnd):
             # Disable all effects
             always_on_top_var.set(False)
             hover_effect_var.set(False)
+            stop_topmost_monitoring()
             set_window_always_on_top(selected_hwnd, False)
             stop_hover_effect(selected_hwnd)
             set_window_transparent(selected_hwnd, 255)  # Make the window fully visible before closing
+        
+        # Stop tray icon if it exists
+        if tray_icon:
+            tray_icon.stop()
+        
         root.destroy()
+
+    def on_minimize_to_tray():
+        """Minimize the window to system tray."""
+        hide_to_tray()
 
     # Create the main UI window
     root = tk.Tk()
@@ -204,7 +460,7 @@ def create_ui():
         print(f"Could not load icon: {e}")
 
     # Resize the window to make it more spacious
-    root.geometry("400x250")  # Adjust the size to fit the content better
+    root.geometry("400x280")  # Increased height to fit the new button
 
     # Window selection frame
     selection_frame = tk.Frame(root)
@@ -220,6 +476,10 @@ def create_ui():
     # Refresh button
     refresh_button = tk.Button(selection_frame, text="Refresh Window List", command=refresh_windows)
     refresh_button.pack(pady=(5, 0))
+
+    # Minimize to tray button
+    tray_button = tk.Button(selection_frame, text="Minimize to Tray", command=on_minimize_to_tray)
+    tray_button.pack(pady=(5, 0))
 
     # Controls frame
     controls_frame = tk.Frame(root)
@@ -247,6 +507,12 @@ def create_ui():
 
     # Initialize with available windows
     refresh_windows()
+
+    # Set up system tray
+    tray_available = setup_tray()
+    if not tray_available:
+        # If tray setup failed, disable the minimize to tray button
+        tray_button.config(state='disabled', text="Tray Unavailable")
 
     # Start the UI loop
     root.mainloop()
