@@ -34,7 +34,7 @@ jobs:
         pyinstaller --onefile --windowed --name "hover-test" hover.py
         
     - name: Upload test artifact
-      uses: actions/upload-artifact@v3
+      uses: actions/upload-artifact@v4
       with:
         name: test-build
         path: dist/hover-test.exe
