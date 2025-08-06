@@ -5,25 +5,45 @@ import time
 import tkinter as tk
 from tkinter import ttk, messagebox
 import threading
-
-# Version information
-__version__ = "1.0.0"
-__title__ = "Hover"
+import os
+import sys
+from version import __version__, __title__
 
 def set_window_always_on_top(hwnd, always_on_top):
     """Set the window to always stay on top."""
-    if always_on_top:
-        win32gui.SetWindowPos(hwnd, win32con.HWND_TOPMOST, 0, 0, 0, 0, win32con.SWP_NOMOVE | win32con.SWP_NOSIZE)
-    else:
-        win32gui.SetWindowPos(hwnd, win32con.HWND_NOTOPMOST, 0, 0, 0, 0, win32con.SWP_NOMOVE | win32con.SWP_NOSIZE)
+    try:
+        # Check if the window handle is still valid
+        if not win32gui.IsWindow(hwnd):
+            return False
+        
+        if always_on_top:
+            result = win32gui.SetWindowPos(hwnd, win32con.HWND_TOPMOST, 0, 0, 0, 0, 
+                                         win32con.SWP_NOMOVE | win32con.SWP_NOSIZE | win32con.SWP_NOACTIVATE)
+        else:
+            result = win32gui.SetWindowPos(hwnd, win32con.HWND_NOTOPMOST, 0, 0, 0, 0, 
+                                         win32con.SWP_NOMOVE | win32con.SWP_NOSIZE | win32con.SWP_NOACTIVATE)
+        
+        return result != 0
+    except Exception as e:
+        print(f"Error setting window always on top: {e}")
+        return False
 
 def set_window_transparent(hwnd, transparency):
     """Set the window transparency."""
-    extended_style = win32gui.GetWindowLong(hwnd, win32con.GWL_EXSTYLE)
-    win32gui.SetWindowLong(hwnd, win32con.GWL_EXSTYLE, extended_style | win32con.WS_EX_LAYERED)
-    
-    # Set the window transparency based on the specified value
-    win32gui.SetLayeredWindowAttributes(hwnd, 0, transparency, win32con.LWA_ALPHA)
+    try:
+        # Check if the window handle is still valid
+        if not win32gui.IsWindow(hwnd):
+            return False
+            
+        extended_style = win32gui.GetWindowLong(hwnd, win32con.GWL_EXSTYLE)
+        win32gui.SetWindowLong(hwnd, win32con.GWL_EXSTYLE, extended_style | win32con.WS_EX_LAYERED)
+        
+        # Set the window transparency based on the specified value
+        result = win32gui.SetLayeredWindowAttributes(hwnd, 0, transparency, win32con.LWA_ALPHA)
+        return result != 0
+    except Exception as e:
+        print(f"Error setting window transparency: {e}")
+        return False
 
 def is_mouse_over_window(hwnd):
     """Check if the mouse is over the window."""
@@ -61,11 +81,32 @@ def create_ui():
         if selection and selection != "Select a window...":
             # Extract hwnd from the selection string
             hwnd_str = selection.split(" - ")[0]
-            selected_hwnd = int(hwnd_str)
-            
-            # Enable the control buttons
-            topmost_checkbox.config(state='normal')
-            hover_effect_checkbox.config(state='normal')
+            try:
+                new_hwnd = int(hwnd_str)
+                # Check if the window is still valid
+                if win32gui.IsWindow(new_hwnd):
+                    # Reset any effects on the previously selected window
+                    if selected_hwnd and win32gui.IsWindow(selected_hwnd):
+                        always_on_top_var.set(False)
+                        hover_effect_var.set(False)
+                        set_window_always_on_top(selected_hwnd, False)
+                        stop_hover_effect(selected_hwnd)
+                    
+                    selected_hwnd = new_hwnd
+                    
+                    # Enable the control buttons
+                    topmost_checkbox.config(state='normal')
+                    hover_effect_checkbox.config(state='normal')
+                    
+                    # Reset the control states
+                    always_on_top_var.set(False)
+                    hover_effect_var.set(False)
+                else:
+                    messagebox.showwarning("Invalid Window", "The selected window is no longer available. Please refresh the window list.")
+                    refresh_windows()
+            except ValueError:
+                messagebox.showerror("Error", "Invalid window selection.")
+                refresh_windows()
         else:
             selected_hwnd = None
             # Disable the control buttons
@@ -96,7 +137,11 @@ def create_ui():
         """Toggle the always-on-top state of the selected window."""
         if selected_hwnd:
             current_topmost = always_on_top_var.get()
-            set_window_always_on_top(selected_hwnd, current_topmost)
+            success = set_window_always_on_top(selected_hwnd, current_topmost)
+            if not success:
+                # If setting failed, revert the checkbox state
+                always_on_top_var.set(not current_topmost)
+                messagebox.showerror("Error", "Failed to set window always on top. The window may have been closed.")
 
     def on_toggle_hover_effect():
         """Toggle the hover effect (show/hide based on mouse hover)."""
@@ -115,6 +160,9 @@ def create_ui():
     def start_hover_effect(hwnd):
         """Start the hover effect: make the window visible on hover."""
         while hover_effect_var.get() and hwnd == selected_hwnd:
+            # Check if the window is still valid
+            if not win32gui.IsWindow(hwnd):
+                break
             check_hover_and_update(hwnd, 255)  # Full opacity when hovered
             time.sleep(0.1)
 
@@ -124,7 +172,7 @@ def create_ui():
 
     def on_close():
         """Handle window close event to disable all effects and reset the selected window."""
-        if selected_hwnd:
+        if selected_hwnd and win32gui.IsWindow(selected_hwnd):
             # Disable all effects
             always_on_top_var.set(False)
             hover_effect_var.set(False)
@@ -136,6 +184,24 @@ def create_ui():
     # Create the main UI window
     root = tk.Tk()
     root.title(f"{__title__} v{__version__}")
+    
+    # Set the window icon for taskbar
+    def get_icon_path():
+        """Get the correct path to the icon file."""
+        if getattr(sys, 'frozen', False):
+            # Running as executable
+            return os.path.join(sys._MEIPASS, 'hover_icon.ico')
+        else:
+            # Running as script
+            return 'hover_icon.ico'
+    
+    try:
+        icon_path = get_icon_path()
+        if os.path.exists(icon_path):
+            root.iconbitmap(icon_path)
+    except Exception as e:
+        # If icon loading fails, continue without icon
+        print(f"Could not load icon: {e}")
 
     # Resize the window to make it more spacious
     root.geometry("400x250")  # Adjust the size to fit the content better

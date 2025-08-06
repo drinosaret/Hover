@@ -28,22 +28,45 @@ jobs:
         pip install -r requirements.txt
         pip install pyinstaller
         
+    - name: Extract version from Python file
+      id: get_version
+      run: |
+        $version = python -c "import version; print(version.__version__)"
+        echo "VERSION=$version" >> $env:GITHUB_OUTPUT
+        echo "Extracted version: $version"
+      shell: powershell
+        
     - name: Build executable
       run: |
         pyinstaller hover.spec
       shell: cmd
       
+    - name: Rename executable with version
+      run: |
+        $version = "${{ steps.get_version.outputs.VERSION }}"
+        $originalPath = "dist\hover.exe"
+        $versionedPath = "dist\hover-v$version.exe"
+        if (Test-Path $originalPath) {
+          Rename-Item $originalPath $versionedPath
+          echo "Renamed executable to hover-v$version.exe"
+        } else {
+          echo "Original executable not found at $originalPath"
+          exit 1
+        }
+      shell: powershell
+      
     - name: Create portable package
       run: |
         mkdir release
-        copy dist\hover.exe release\
+        $version = "${{ steps.get_version.outputs.VERSION }}"
+        copy "dist\hover-v$version.exe" release\
         copy README.md release\
-      shell: cmd
+      shell: powershell
       
     - name: Upload executable artifact
       uses: actions/upload-artifact@v4
       with:
-        name: hover-executable
+        name: hover-executable-v${{ steps.get_version.outputs.VERSION }}
         path: release/
         
     - name: Create Release
@@ -51,10 +74,10 @@ jobs:
       uses: softprops/action-gh-release@v1
       with:
         files: |
-          release/hover.exe
+          release/hover-v${{ steps.get_version.outputs.VERSION }}.exe
         name: Release ${{ github.ref_name }}
         body: |
-          Download `hover.exe` and run it. No installation needed.
+          Download `hover-v${{ steps.get_version.outputs.VERSION }}.exe` and run it. No installation needed.
           
           Make any window invisible until you hover over it.
         draft: false

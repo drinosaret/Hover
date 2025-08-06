@@ -25,3 +25,6 @@ Desktop.ini
 
 # Project specific
 *.exe
+
+# Include the application icon
+!hover_icon.ico
