@@ -1,0 +1,41 @@
+name: Test Build
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+
+jobs:
+  test:
+    runs-on: windows-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.11'
+        
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+        pip install pyinstaller
+        
+    - name: Test syntax
+      run: |
+        python -m py_compile hover.py
+        
+    - name: Test build process
+      run: |
+        pyinstaller --onefile --windowed --name "hover-test" hover.py
+        
+    - name: Upload test artifact
+      uses: actions/upload-artifact@v3
+      with:
+        name: test-build
+        path: dist/hover-test.exe
+        retention-days: 7
