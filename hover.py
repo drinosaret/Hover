@@ -8,6 +8,8 @@ import threading
 import os
 import sys
 import pystray
+import signal
+import atexit
 from PIL import Image, ImageDraw
 from version import __version__, __title__
 
@@ -86,11 +88,44 @@ def set_window_transparent(hwnd, transparency):
         print(f"Error setting window transparency: {e}")
         return False
 
+def restore_window_to_normal(hwnd):
+    """Force restore a window to normal state (full opacity, not topmost)."""
+    try:
+        if not win32gui.IsWindow(hwnd):
+            return False
+            
+        # Remove topmost status
+        win32gui.SetWindowPos(hwnd, win32con.HWND_NOTOPMOST, 0, 0, 0, 0, 
+                             win32con.SWP_NOMOVE | win32con.SWP_NOSIZE | win32con.SWP_NOACTIVATE)
+        
+        # Remove layered window style to restore normal transparency
+        extended_style = win32gui.GetWindowLong(hwnd, win32con.GWL_EXSTYLE)
+        win32gui.SetWindowLong(hwnd, win32con.GWL_EXSTYLE, extended_style & ~win32con.WS_EX_LAYERED)
+        
+        print(f"Force restored window {hwnd} to normal state")
+        return True
+    except Exception as e:
+        print(f"Error restoring window to normal: {e}")
+        return False
+
 def is_mouse_over_window(hwnd):
     """Check if the mouse is over the window."""
-    mouse_x, mouse_y = win32api.GetCursorPos()
-    window_rect = win32gui.GetWindowRect(hwnd)
-    return window_rect[0] <= mouse_x <= window_rect[2] and window_rect[1] <= mouse_y <= window_rect[3]
+    try:
+        # Check if the window handle is still valid
+        if not win32gui.IsWindow(hwnd):
+            return False
+            
+        mouse_x, mouse_y = win32api.GetCursorPos()
+        window_rect = win32gui.GetWindowRect(hwnd)
+        
+        # Validate window rect
+        if len(window_rect) != 4:
+            return False
+            
+        return window_rect[0] <= mouse_x <= window_rect[2] and window_rect[1] <= mouse_y <= window_rect[3]
+    except Exception as e:
+        print(f"Error checking mouse position: {e}")
+        return False
 
 def check_hover_and_update(hwnd, transparency):
     """Check mouse hover and adjust window transparency."""
@@ -213,64 +248,137 @@ def create_ui():
     def on_window_select():
         """Handle window selection from dropdown."""
         nonlocal selected_hwnd
+        global _global_selected_hwnd
         selection = window_var.get()
+        
         if selection and selection != "Select a window...":
             # Extract hwnd from the selection string
-            hwnd_str = selection.split(" - ")[0]
             try:
+                hwnd_str = selection.split(" - ")[0]
                 new_hwnd = int(hwnd_str)
+                
                 # Check if the window is still valid
-                if win32gui.IsWindow(new_hwnd):
-                    # Reset any effects on the previously selected window
-                    if selected_hwnd and win32gui.IsWindow(selected_hwnd):
-                        always_on_top_var.set(False)
-                        hover_effect_var.set(False)
-                        stop_topmost_monitoring()
-                        set_window_always_on_top(selected_hwnd, False)
-                        stop_hover_effect(selected_hwnd)
-                    
-                    selected_hwnd = new_hwnd
-                    
-                    # Enable the control buttons
-                    topmost_checkbox.config(state='normal')
-                    hover_effect_checkbox.config(state='normal')
-                    
-                    # Reset the control states
-                    always_on_top_var.set(False)
-                    hover_effect_var.set(False)
-                else:
+                if not win32gui.IsWindow(new_hwnd):
                     messagebox.showwarning("Invalid Window", "The selected window is no longer available. Please refresh the window list.")
                     refresh_windows()
-            except ValueError:
-                messagebox.showerror("Error", "Invalid window selection.")
+                    return
+                
+                # Reset any effects on the previously selected window
+                if selected_hwnd and selected_hwnd != new_hwnd:
+                    try:
+                        if win32gui.IsWindow(selected_hwnd):
+                            # Stop all effects and restore normal state
+                            always_on_top_var.set(False)
+                            hover_effect_var.set(False)
+                            stop_topmost_monitoring()
+                            set_window_always_on_top(selected_hwnd, False)
+                            stop_hover_effect(selected_hwnd)
+                            set_window_transparent(selected_hwnd, 255)  # Reset transparency to fully opaque
+                            print(f"Reset previous window {selected_hwnd} to normal state")
+                    except Exception as e:
+                        print(f"Error resetting previous window: {e}")
+                
+                selected_hwnd = new_hwnd
+                # Update global tracking variable
+                _global_selected_hwnd = new_hwnd
+                
+                # Enable the control buttons
+                topmost_checkbox.config(state='normal')
+                hover_effect_checkbox.config(state='normal')
+                transparency_slider.config(state='normal')
+                
+                # Reset the control states for the new window
+                always_on_top_var.set(False)
+                hover_effect_var.set(False)
+                transparency_var.set(255)  # Reset to fully opaque
+                transparency_percent_label.config(text="100%")
+                
+                # Ensure the new window starts with full opacity
+                set_window_transparent(selected_hwnd, 255)
+                print(f"Selected window {selected_hwnd}: {selection}")
+                
+            except (ValueError, IndexError) as e:
+                print(f"Error parsing window selection: {e}")
+                messagebox.showerror("Error", "Invalid window selection format.")
+                refresh_windows()
+            except Exception as e:
+                print(f"Unexpected error in window selection: {e}")
+                messagebox.showerror("Error", f"Failed to select window: {e}")
                 refresh_windows()
         else:
+            # No window selected - disable controls
+            if selected_hwnd:
+                try:
+                    # Clean up current window if valid
+                    if win32gui.IsWindow(selected_hwnd):
+                        set_window_transparent(selected_hwnd, 255)
+                        set_window_always_on_top(selected_hwnd, False)
+                        stop_topmost_monitoring()
+                except Exception as e:
+                    print(f"Error cleaning up on deselection: {e}")
+            
             selected_hwnd = None
+            # Clear global tracking variable
+            _global_selected_hwnd = None
             # Disable the control buttons
             topmost_checkbox.config(state='disabled')
             hover_effect_checkbox.config(state='disabled')
+            transparency_slider.config(state='disabled')
+            always_on_top_var.set(False)
+            hover_effect_var.set(False)
+            transparency_var.set(255)
+            transparency_percent_label.config(text="100%")
     
     def refresh_windows():
         """Refresh the list of available windows."""
-        windows = get_all_windows()
-        window_options = ["Select a window..."]
-        for hwnd, title in windows:
-            # Limit title length for better display
-            display_title = title[:50] + "..." if len(title) > 50 else title
-            window_options.append(f"{hwnd} - {display_title}")
-        
-        window_dropdown['values'] = window_options
-        window_var.set("Select a window...")
-        
-        # Reset selection and disable controls
-        nonlocal selected_hwnd
-        if selected_hwnd:
-            stop_topmost_monitoring()
-        selected_hwnd = None
-        topmost_checkbox.config(state='disabled')
-        hover_effect_checkbox.config(state='disabled')
-        always_on_top_var.set(False)
-        hover_effect_var.set(False)
+        global _global_selected_hwnd
+        try:
+            windows = get_all_windows()
+            window_options = ["Select a window..."]
+            
+            # Filter out invalid windows and sort by title
+            valid_windows = []
+            for hwnd, title in windows:
+                if win32gui.IsWindow(hwnd) and title.strip():
+                    valid_windows.append((hwnd, title))
+            
+            # Sort by title for better user experience
+            valid_windows.sort(key=lambda x: x[1].lower())
+            
+            for hwnd, title in valid_windows:
+                # Limit title length for better display
+                display_title = title[:50] + "..." if len(title) > 50 else title
+                window_options.append(f"{hwnd} - {display_title}")
+            
+            window_dropdown['values'] = window_options
+            window_var.set("Select a window...")
+            
+            # Reset selection and disable controls
+            nonlocal selected_hwnd
+            if selected_hwnd:
+                # Clean up previous window state
+                try:
+                    if win32gui.IsWindow(selected_hwnd):
+                        set_window_transparent(selected_hwnd, 255)  # Restore full opacity
+                        set_window_always_on_top(selected_hwnd, False)  # Remove topmost
+                except Exception as e:
+                    print(f"Error cleaning up previous window: {e}")
+                stop_topmost_monitoring()
+                
+            selected_hwnd = None
+            # Clear global tracking variable
+            _global_selected_hwnd = None
+            topmost_checkbox.config(state='disabled')
+            hover_effect_checkbox.config(state='disabled')
+            transparency_slider.config(state='disabled')
+            always_on_top_var.set(False)
+            hover_effect_var.set(False)
+            transparency_var.set(255)
+            transparency_percent_label.config(text="100%")
+            
+        except Exception as e:
+            print(f"Error refreshing windows: {e}")
+            messagebox.showerror("Error", f"Failed to refresh window list: {e}")
 
     def on_toggle_topmost():
         """Toggle the always-on-top state of the selected window."""
@@ -301,27 +409,112 @@ def create_ui():
         if not selected_hwnd:
             return
             
-        if hover_effect_var.get():
-            # Start the hover effect in a separate thread
-            hover_thread = threading.Thread(target=start_hover_effect, args=(selected_hwnd,))
-            hover_thread.daemon = True
-            hover_thread.start()
-        else:
-            # Stop the hover effect and set window to fully visible
-            stop_hover_effect(selected_hwnd)
+        try:
+            # Verify window is still valid
+            if not win32gui.IsWindow(selected_hwnd):
+                messagebox.showwarning("Invalid Window", "The selected window is no longer available.")
+                hover_effect_var.set(False)
+                refresh_windows()
+                return
+                
+            if hover_effect_var.get():
+                # Start the hover effect in a separate thread
+                hover_thread = threading.Thread(target=start_hover_effect, args=(selected_hwnd,))
+                hover_thread.daemon = True
+                hover_thread.start()
+                print(f"Started hover effect for window {selected_hwnd}")
+            else:
+                # Stop the hover effect and restore current transparency
+                stop_hover_effect(selected_hwnd)
+                print(f"Stopped hover effect for window {selected_hwnd}")
+                
+        except Exception as e:
+            print(f"Error toggling hover effect: {e}")
+            hover_effect_var.set(False)
+            messagebox.showerror("Error", f"Failed to toggle hover effect: {e}")
+
+    def on_transparency_change():
+        """Handle transparency slider changes."""
+        if not selected_hwnd:
+            return
+        
+        try:
+            # Get current transparency value (0-255)
+            transparency_value = transparency_var.get()
+            
+            # Update percentage label
+            percentage = int((transparency_value / 255) * 100)
+            transparency_percent_label.config(text=f"{percentage}%")
+            
+            # Apply transparency only if hover effect is not active
+            # and window is still valid
+            if not hover_effect_var.get() and win32gui.IsWindow(selected_hwnd):
+                set_window_transparent(selected_hwnd, transparency_value)
+                
+        except Exception as e:
+            print(f"Error in transparency change: {e}")
+            # Reset percentage label on error
+            transparency_percent_label.config(text="Error")
 
     def start_hover_effect(hwnd):
         """Start the hover effect: make the window visible on hover."""
-        while hover_effect_var.get() and hwnd == selected_hwnd:
-            # Check if the window is still valid
-            if not win32gui.IsWindow(hwnd):
-                break
-            check_hover_and_update(hwnd, 255)  # Full opacity when hovered
-            time.sleep(0.1)
+        last_state = None
+        error_count = 0
+        max_errors = 5
+        
+        while hover_effect_var.get() and hwnd == selected_hwnd and error_count < max_errors:
+            try:
+                # Check if the window is still valid
+                if not win32gui.IsWindow(hwnd):
+                    print(f"Window {hwnd} no longer valid, stopping hover effect")
+                    break
+                
+                # Check current mouse state
+                is_hovering = is_mouse_over_window(hwnd)
+                
+                # Only update transparency if state changed (performance optimization)
+                if is_hovering != last_state:
+                    if is_hovering:
+                        # Use current transparency slider value when hovered
+                        hover_transparency = transparency_var.get()
+                        set_window_transparent(hwnd, hover_transparency)
+                    else:
+                        # Make window invisible when not hovered
+                        set_window_transparent(hwnd, 0)
+                    last_state = is_hovering
+                
+                error_count = 0  # Reset error count on successful operation
+                time.sleep(0.05)  # Reduced from 0.1 for better responsiveness
+                
+            except Exception as e:
+                error_count += 1
+                print(f"Error in hover effect (attempt {error_count}/{max_errors}): {e}")
+                time.sleep(0.2)  # Wait longer after errors
+        
+        if error_count >= max_errors:
+            print(f"Too many errors in hover effect for window {hwnd}, stopping")
+            # Try to restore window transparency before stopping
+            try:
+                current_transparency = transparency_var.get()
+                set_window_transparent(hwnd, current_transparency)
+            except:
+                pass
 
     def stop_hover_effect(hwnd):
-        """Stop the hover effect and set window to fully visible."""
-        set_window_transparent(hwnd, 255)  # Make the window fully visible when hover effect is stopped
+        """Stop the hover effect and restore current transparency setting."""
+        try:
+            if win32gui.IsWindow(hwnd):
+                current_transparency = transparency_var.get()
+                set_window_transparent(hwnd, current_transparency)  # Restore current transparency slider value
+                print(f"Stopped hover effect for window {hwnd}, restored transparency to {current_transparency}")
+        except Exception as e:
+            print(f"Error stopping hover effect: {e}")
+            # Force restore to full opacity as fallback
+            try:
+                set_window_transparent(hwnd, 255)
+                print(f"Force restored window {hwnd} to full opacity")
+            except:
+                pass
 
     def is_window_topmost(hwnd):
         """Check if a window is currently set as topmost."""
@@ -418,19 +611,49 @@ def create_ui():
 
     def on_close():
         """Handle window close event to disable all effects and reset the selected window."""
-        if selected_hwnd and win32gui.IsWindow(selected_hwnd):
-            # Disable all effects
-            always_on_top_var.set(False)
-            hover_effect_var.set(False)
-            stop_topmost_monitoring()
-            set_window_always_on_top(selected_hwnd, False)
-            stop_hover_effect(selected_hwnd)
-            set_window_transparent(selected_hwnd, 255)  # Make the window fully visible before closing
+        print("Application closing, cleaning up...")
         
-        # Stop tray icon if it exists
-        if tray_icon:
-            tray_icon.stop()
+        try:
+            if selected_hwnd and win32gui.IsWindow(selected_hwnd):
+                # First, disable all effects to stop any active threads
+                always_on_top_var.set(False)
+                hover_effect_var.set(False)
+                stop_topmost_monitoring()
+                
+                # Give threads a moment to stop, especially hover effect
+                time.sleep(0.2)
+                
+                # Force restore window to normal state regardless of current settings
+                try:
+                    set_window_always_on_top(selected_hwnd, False)
+                except Exception as e:
+                    print(f"Error removing topmost: {e}")
+                
+                try:
+                    # Use the dedicated restoration function
+                    restore_window_to_normal(selected_hwnd)
+                except Exception as e:
+                    print(f"Error restoring window: {e}")
+                    # Fallback: try to set full opacity
+                    try:
+                        set_window_transparent(selected_hwnd, 255)
+                        print(f"Fallback: Set window {selected_hwnd} to full opacity")
+                    except Exception as e2:
+                        print(f"Fallback also failed: {e2}")
+                
+                print(f"Restored window {selected_hwnd} to normal state")
+            
+        except Exception as e:
+            print(f"Error during cleanup: {e}")
         
+        try:
+            # Stop tray icon if it exists
+            if tray_icon:
+                tray_icon.stop()
+        except Exception as e:
+            print(f"Error stopping tray icon: {e}")
+        
+        print("Application cleanup complete")
         root.destroy()
 
     def on_minimize_to_tray():
@@ -460,7 +683,7 @@ def create_ui():
         print(f"Could not load icon: {e}")
 
     # Resize the window to make it more spacious
-    root.geometry("400x280")  # Increased height to fit the new button
+    root.geometry("400x320")  # Increased height to fit the transparency slider
 
     # Window selection frame
     selection_frame = tk.Frame(root)
@@ -497,6 +720,26 @@ def create_ui():
                                           command=on_toggle_hover_effect, state='disabled')
     hover_effect_checkbox.pack(padx=20, pady=5, anchor='w')
 
+    # Transparency slider frame
+    transparency_frame = tk.Frame(controls_frame)
+    transparency_frame.pack(padx=20, pady=5, fill='x')
+    
+    # Transparency label and slider
+    transparency_label = tk.Label(transparency_frame, text="Window Transparency:")
+    transparency_label.pack(anchor='w')
+    
+    # Create transparency variable (255 = fully opaque, 0 = fully transparent)
+    transparency_var = tk.IntVar(value=255)
+    
+    transparency_slider = tk.Scale(transparency_frame, from_=0, to=255, orient='horizontal', 
+                                  variable=transparency_var, command=lambda x: on_transparency_change(),
+                                  state='disabled', length=300)
+    transparency_slider.pack(fill='x', pady=(2, 0))
+    
+    # Add percentage label
+    transparency_percent_label = tk.Label(transparency_frame, text="100%", fg="gray")
+    transparency_percent_label.pack(anchor='w')
+
     # Instructions
     instructions = tk.Label(root, text="Select a window from the dropdown above to enable controls.", 
                            fg="gray", wraplength=350)
@@ -517,10 +760,34 @@ def create_ui():
     # Start the UI loop
     root.mainloop()
 
+# Global variable to track the selected window for cleanup
+_global_selected_hwnd = None
+
+def cleanup_on_exit():
+    """Global cleanup function called when the application exits."""
+    global _global_selected_hwnd
+    if _global_selected_hwnd and win32gui.IsWindow(_global_selected_hwnd):
+        try:
+            print("Global cleanup: Restoring window to normal state...")
+            restore_window_to_normal(_global_selected_hwnd)
+        except Exception as e:
+            print(f"Global cleanup error: {e}")
+
+def signal_handler(signum, frame):
+    """Handle system signals for graceful shutdown."""
+    print(f"Received signal {signum}, cleaning up...")
+    cleanup_on_exit()
+    sys.exit(0)
+
 def main():
     """Main function to run the application."""
     print("Starting Window Control application...")
     print("Use the GUI to select a window and apply effects.")
+    
+    # Register cleanup handlers
+    atexit.register(cleanup_on_exit)
+    signal.signal(signal.SIGINT, signal_handler)
+    signal.signal(signal.SIGTERM, signal_handler)
     
     # Start the UI - it now handles everything
     create_ui()
